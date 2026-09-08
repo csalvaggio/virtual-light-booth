@@ -1,0 +1,33 @@
+# CMake
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# IDE/editor
+*.swp
+.vscode/
+.idea/
+
+# Compiled files
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Miscellaneous macOS AppleDouble files
+.DS_Store
+._*
+
+# Miscellaneous
+*.ORIG
+*.orig
+*.SAVE
+*.save
+*.OLD
+*.old
