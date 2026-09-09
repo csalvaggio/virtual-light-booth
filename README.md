@@ -253,20 +253,6 @@ Mode-specific keys do not alter hidden state in the inactive mode. Bradford adap
 
 When you press `s`, the program opens a portable save-file dialog so you can choose the directory and filename. The suggested filename records the illuminant, ND transmission, active observer or camera, adaptation/white-balance state, and output display family. PNG, JPEG, TIFF, and BMP are supported.
 
-## Classifier-oriented use
-
-For experiments intended to expose classifier sensitivity to illumination and sensor response, a useful baseline is:
-
-```text
-Bradford adaptation: OFF
-Camera white balance: OFF
-ND transmission: varied deliberately
-Illuminant: varied deliberately
-Observer or camera: varied deliberately
-```
-
-With this configuration, the application preserves the effects introduced by illuminant spectral shape, illuminant level, observer choice, and camera spectral sensitivity rather than trying to normalize those differences away.
-
 ## Display and saved-file caveats
 
 The encoded pixels describe the application's **synthetic reference spectral display**, not the actual monitor on which `cv::imshow()` happens to run. An ordinary monitor will generally have different physical primary spectra.
