@@ -22,8 +22,8 @@
 namespace {
 
 constexpr char kWindowName[] = "Virtual Light Booth - ColorChecker";
-constexpr int kCanvasWidth = 1200;
-constexpr int kCanvasHeight = 800;
+constexpr int kCanvasWidth = 1280;
+constexpr int kCanvasHeight = 720;
 constexpr int kPatchSize = 125;
 constexpr int kGap = 20;
 constexpr int kBorder = 60;
