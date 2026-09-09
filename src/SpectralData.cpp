@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace vlb {
 namespace {
@@ -249,7 +250,7 @@ std::size_t findColumn(const NumericTable& table, const std::string& name) {
 
 bool isSpectralDataDirectory(const std::filesystem::path& path) {
   return std::filesystem::is_directory(path) &&
-         std::filesystem::is_regular_file(path / "cie_1931_2deg_5nm.csv") &&
+         std::filesystem::is_regular_file(path / "cie_standard_observers_1nm.csv") &&
          std::filesystem::is_regular_file(path / "cie_illuminants_5nm.csv") &&
          std::filesystem::is_regular_file(
              path / "colorchecker_babelcolor_avg30_10nm.csv") &&
@@ -263,15 +264,27 @@ SpectralData loadSpectralData(const std::filesystem::path& data_dir,
   SpectralData data;
   data.wavelengths_nm = makeWavelengthGrid(380.0, 730.0, sampling_nm);
 
-  const auto cmf = loadNumericCsv(data_dir / "cie_1931_2deg_5nm.csv");
+  const auto cmf = loadNumericCsv(data_dir / "cie_standard_observers_1nm.csv");
   const std::size_t cmf_w = findColumn(cmf, "wavelength_nm");
   const auto& cmf_source_wavelengths = cmf.columns[cmf_w];
-  for (int i = 0; i < 3; ++i) {
-    const std::string name =
-        (i == 0) ? "x_bar" : (i == 1) ? "y_bar" : "z_bar";
-    const std::size_t col = findColumn(cmf, name);
-    data.xyz_cmf[i] = resampleLinear(cmf_source_wavelengths, cmf.columns[col],
-                                     data.wavelengths_nm, true);
+
+  for (const auto& observer_definition :
+       {std::pair{"CIE 1931 2-degree observer", "2deg"},
+        std::pair{"CIE 1964 10-degree observer", "10deg"}}) {
+    StandardObserver observer;
+    observer.name = observer_definition.first;
+
+    for (int i = 0; i < 3; ++i) {
+      const std::string component =
+          (i == 0) ? "x_bar_" : (i == 1) ? "y_bar_" : "z_bar_";
+      const std::size_t col =
+          findColumn(cmf, component + observer_definition.second);
+      observer.xyz_cmf[i] =
+          resampleLinear(cmf_source_wavelengths, cmf.columns[col],
+                         data.wavelengths_nm, true);
+    }
+
+    data.observers.push_back(std::move(observer));
   }
 
   const auto illum = loadNumericCsv(data_dir / "cie_illuminants_5nm.csv");

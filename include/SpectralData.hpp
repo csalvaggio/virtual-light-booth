@@ -18,6 +18,11 @@ struct Illuminant {
   std::vector<double> spd;
 };
 
+struct StandardObserver {
+  std::string name;
+  std::array<std::vector<double>, 3> xyz_cmf;
+};
+
 struct CameraSensitivity {
   std::string name;
   std::array<std::vector<double>, 3> rgb;
@@ -25,7 +30,7 @@ struct CameraSensitivity {
 
 struct SpectralData {
   std::vector<double> wavelengths_nm;
-  std::array<std::vector<double>, 3> xyz_cmf;
+  std::vector<StandardObserver> observers;
   std::vector<Illuminant> illuminants;
   std::vector<Patch> patches;
   std::vector<CameraSensitivity> cameras;

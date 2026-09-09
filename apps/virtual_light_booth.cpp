@@ -8,6 +8,7 @@
 #include <portable-file-dialogs.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
@@ -29,10 +30,14 @@ constexpr int kBorder = 60;
 constexpr int kColumns = 6;
 constexpr int kRows = 4;
 constexpr double kNdStep = 0.05;
+constexpr char kDefaultObserverName[] = "CIE 1964 10-degree observer";
+constexpr char kCameraReferenceObserverName[] =
+    "CIE 1931 2-degree observer";
 constexpr char kDefaultCameraName[] = "Canon 5DMarkII";
 
 struct AppState {
   std::size_t illuminant_index = 0;
+  std::size_t observer_index = 0;
   std::size_t camera_index = 0;
   double nd_transmission = 1.0;
   bool camera_mode = false;
@@ -62,12 +67,24 @@ std::size_t findIlluminantIndex(const vlb::SpectralData& data,
   throw std::runtime_error("Required illuminant not found: " + name);
 }
 
+std::size_t findObserverIndex(const vlb::SpectralData& data,
+                              const std::string& name) {
+  for (std::size_t i = 0; i < data.observers.size(); ++i) {
+    if (data.observers[i].name == name) return i;
+  }
+  throw std::runtime_error("Required observer not found: " + name);
+}
+
 std::size_t findCameraIndex(const vlb::SpectralData& data,
                             const std::string& name) {
   for (std::size_t i = 0; i < data.cameras.size(); ++i) {
     if (data.cameras[i].name == name) return i;
   }
   throw std::runtime_error("Required camera not found: " + name);
+}
+
+std::size_t outputSpaceIndex(vlb::OutputSpace output_space) {
+  return output_space == vlb::OutputSpace::SRGB ? 0U : 1U;
 }
 
 cv::Vec3b encodedRgbToBgr8(const cv::Vec3d& rgb) {
@@ -78,38 +95,63 @@ cv::Vec3b encodedRgbToBgr8(const cv::Vec3d& rgb) {
   return cv::Vec3b(to8(rgb[2]), to8(rgb[1]), to8(rgb[0]));
 }
 
-cv::Vec3d renderReflectance(const vlb::SpectralData& data,
-                            const vlb::CameraSensitivity& camera,
-                            const vlb::CameraModel& camera_model,
-                            const vlb::Illuminant& illuminant,
-                            const std::vector<double>& reflectance,
-                            const AppState& state,
-                            const cv::Vec3d& d65_white) {
+cv::Vec3d renderReflectance(
+    const vlb::SpectralData& data,
+    const vlb::StandardObserver& camera_reference_observer,
+    const vlb::StandardObserver& active_observer,
+    const vlb::CameraSensitivity& camera,
+    const vlb::CameraModel& camera_model,
+    const vlb::ReferenceDisplayModel& display_model,
+    const vlb::Illuminant& illuminant,
+    const std::vector<double>& reflectance,
+    const AppState& state,
+    const cv::Vec3d& active_observer_d65_white) {
   cv::Vec3d xyz;
 
   if (state.camera_mode) {
-    xyz = vlb::cameraResponseToXYZ(data, camera, camera_model, reflectance,
-                                   illuminant, state.nd_transmission,
-                                   state.camera_white_balance);
+    xyz = vlb::cameraResponseToXYZ(
+        data, camera_reference_observer, camera, camera_model, reflectance,
+        illuminant, state.nd_transmission, state.camera_white_balance);
   } else {
-    xyz = vlb::reflectanceToXYZ(data, reflectance, illuminant,
+    xyz = vlb::reflectanceToXYZ(data, active_observer, reflectance, illuminant,
                                 state.nd_transmission);
     if (state.chromatic_adaptation) {
-      const cv::Vec3d source_white = vlb::illuminantWhiteXYZ(data, illuminant);
-      xyz = vlb::bradfordAdapt(xyz, source_white, d65_white);
+      const cv::Vec3d source_white =
+          vlb::illuminantWhiteXYZ(data, active_observer, illuminant);
+      xyz = vlb::bradfordAdapt(xyz, source_white,
+                               active_observer_d65_white);
     }
   }
 
-  return vlb::xyzToEncodedRgb(xyz, state.output_space);
+  return vlb::xyzToEncodedRgb(xyz, display_model);
 }
 
-cv::Mat renderChart(const vlb::SpectralData& data,
-                    const std::vector<vlb::CameraModel>& camera_models,
-                    const AppState& state,
-                    const cv::Vec3d& d65_white) {
+cv::Mat renderChart(
+    const vlb::SpectralData& data,
+    const std::vector<vlb::CameraModel>& camera_models,
+    const std::vector<std::array<vlb::ReferenceDisplayModel, 2>>&
+        display_models,
+    std::size_t camera_reference_observer_index,
+    const std::vector<cv::Vec3d>& observer_d65_whites,
+    const AppState& state) {
   const auto& illuminant = data.illuminants.at(state.illuminant_index);
+  const auto& active_observer = data.observers.at(state.observer_index);
+  const auto& active_observer_d65_white =
+      observer_d65_whites.at(state.observer_index);
+  const auto& camera_reference_observer =
+      data.observers.at(camera_reference_observer_index);
   const auto& camera = data.cameras.at(state.camera_index);
   const auto& camera_model = camera_models.at(state.camera_index);
+
+  // The camera RGB->XYZ matrices are fitted to the 1931 2-degree observer, so
+  // camera mode must use the display model characterized for that same XYZ
+  // system. In standard-observer mode, the display model follows the selected
+  // observer.
+  const std::size_t display_observer_index =
+      state.camera_mode ? camera_reference_observer_index : state.observer_index;
+  const auto& display_model =
+      display_models.at(display_observer_index)
+          .at(outputSpaceIndex(state.output_space));
 
   // Model the outer background as a spectrally flat 18% gray reflector so it
   // participates in the same illuminant, ND, observer/camera, and output-space
@@ -117,8 +159,9 @@ cv::Mat renderChart(const vlb::SpectralData& data,
   const std::vector<double> background_reflectance(
       data.wavelengths_nm.size(), 0.18);
   const cv::Vec3b background_bgr = encodedRgbToBgr8(renderReflectance(
-      data, camera, camera_model, illuminant, background_reflectance, state,
-      d65_white));
+      data, camera_reference_observer, active_observer, camera, camera_model,
+      display_model, illuminant, background_reflectance, state,
+      active_observer_d65_white));
 
   cv::Mat canvas(kCanvasHeight, kCanvasWidth, CV_8UC3,
                  cv::Scalar(background_bgr[0], background_bgr[1],
@@ -135,8 +178,9 @@ cv::Mat renderChart(const vlb::SpectralData& data,
   const std::vector<double> surround_reflectance(data.wavelengths_nm.size(),
                                                   0.03);
   const cv::Vec3b surround_bgr = encodedRgbToBgr8(renderReflectance(
-      data, camera, camera_model, illuminant, surround_reflectance, state,
-      d65_white));
+      data, camera_reference_observer, active_observer, camera, camera_model,
+      display_model, illuminant, surround_reflectance, state,
+      active_observer_d65_white));
 
   cv::rectangle(canvas, cv::Rect(board_x, board_y, board_width, board_height),
                 cv::Scalar(surround_bgr[0], surround_bgr[1], surround_bgr[2]),
@@ -147,8 +191,9 @@ cv::Mat renderChart(const vlb::SpectralData& data,
       const std::size_t index = static_cast<std::size_t>(row * kColumns + col);
       const auto& patch = data.patches.at(index);
       const cv::Vec3b bgr = encodedRgbToBgr8(renderReflectance(
-          data, camera, camera_model, illuminant, patch.reflectance, state,
-          d65_white));
+          data, camera_reference_observer, active_observer, camera,
+          camera_model, display_model, illuminant, patch.reflectance, state,
+          active_observer_d65_white));
 
       const int x = board_x + kBorder + col * (kPatchSize + kGap);
       const int y = board_y + kBorder + row * (kPatchSize + kGap);
@@ -163,7 +208,7 @@ cv::Mat renderChart(const vlb::SpectralData& data,
 std::string responseName(const vlb::SpectralData& data,
                          const AppState& state) {
   return state.camera_mode ? data.cameras.at(state.camera_index).name
-                           : "CIE 1931 2-degree observer";
+                           : data.observers.at(state.observer_index).name;
 }
 
 std::string sanitizeFilenameComponent(std::string value) {
@@ -193,7 +238,9 @@ std::string defaultSaveFilename(const vlb::SpectralData& data,
         << sanitizeFilenameComponent(data.cameras.at(state.camera_index).name)
         << "_wb_" << (state.camera_white_balance ? "on" : "off");
   } else {
-    oss << "_cie_adapt_" << (state.chromatic_adaptation ? "on" : "off");
+    oss << "_observer_"
+        << sanitizeFilenameComponent(data.observers.at(state.observer_index).name)
+        << "_adapt_" << (state.chromatic_adaptation ? "on" : "off");
   }
 
   oss << '_'
@@ -266,11 +313,12 @@ void printHelp() {
       << "  i / I     next / previous illuminant\n"
       << "  [ / ]     decrease / increase ND transmission by 0.05\n"
       << "  c         toggle CIE observer / camera spectral response\n"
-      << "  m / M     next / previous Jiang camera model (camera mode only)\n"
+      << "  m / M     next / previous response model\n"
+      << "            (standard observer in CIE mode; camera in camera mode)\n"
       << "  o         toggle sRGB / Adobe RGB (1998) encoding\n"
       << "  a         toggle Bradford adaptation (CIE mode)\n"
       << "  w         toggle camera white balance (camera mode)\n"
-      << "  Esc       reset to D65, ND=1, CIE observer (default camera), "
+      << "  Esc       reset to D65, ND=1, 10-degree observer, default camera, "
       << "sRGB\n"
       << "  s         save current rendered image using a file-save dialog\n"
       << "  ?         display this help\n"
@@ -279,7 +327,8 @@ void printHelp() {
 
 void printCameraMatrix(const std::string& camera_name,
                        const vlb::CameraModel& model) {
-  std::cout << camera_name << " D65-fitted raw-to-XYZ matrix:\n";
+  std::cout << camera_name
+            << " D65-fitted raw-to-XYZ matrix (2-degree CIE reference):\n";
   for (int r = 0; r < 3; ++r) {
     std::cout << "  [ ";
     for (int c = 0; c < 3; ++c) {
@@ -290,9 +339,23 @@ void printCameraMatrix(const std::string& camera_name,
   }
 }
 
-AppState defaultState(std::size_t d65_index, std::size_t camera_index) {
+void printDisplayMatrix(const vlb::ReferenceDisplayModel& model) {
+  std::cout << model.name << " XYZ-to-linear-RGB matrix:\n";
+  for (int r = 0; r < 3; ++r) {
+    std::cout << "  [ ";
+    for (int c = 0; c < 3; ++c) {
+      std::cout << std::setw(11) << std::fixed << std::setprecision(6)
+                << model.xyz_to_rgb(r, c) << (c == 2 ? " " : ", ");
+    }
+    std::cout << "]\n";
+  }
+}
+
+AppState defaultState(std::size_t d65_index, std::size_t observer_index,
+                      std::size_t camera_index) {
   AppState state;
   state.illuminant_index = d65_index;
+  state.observer_index = observer_index;
   state.camera_index = camera_index;
   return state;
 }
@@ -306,38 +369,94 @@ int main(int argc, char** argv) {
     const vlb::SpectralData data = vlb::loadSpectralData(data_dir, sampling_nm);
 
     const std::size_t d65_index = findIlluminantIndex(data, "D65");
+    const std::size_t default_observer_index =
+        findObserverIndex(data, kDefaultObserverName);
+    const std::size_t camera_reference_observer_index =
+        findObserverIndex(data, kCameraReferenceObserverName);
     const std::size_t default_camera_index =
         findCameraIndex(data, kDefaultCameraName);
-    const vlb::Illuminant& d65 = data.illuminants.at(d65_index);
-    const cv::Vec3d d65_white = vlb::illuminantWhiteXYZ(data, d65);
 
+    const vlb::Illuminant& d65 = data.illuminants.at(d65_index);
+    const vlb::StandardObserver& camera_reference_observer =
+        data.observers.at(camera_reference_observer_index);
+
+    std::vector<cv::Vec3d> observer_d65_whites;
+    observer_d65_whites.reserve(data.observers.size());
+    for (const auto& observer : data.observers) {
+      observer_d65_whites.push_back(
+          vlb::illuminantWhiteXYZ(data, observer, d65));
+    }
+
+    // Camera color-correction matrices intentionally remain tied to the
+    // CIE 1931 2-degree observer, independently of the default/selected CIE
+    // viewing observer. Observer selection affects only the standard-observer
+    // rendering path.
     std::vector<vlb::CameraModel> camera_models;
     camera_models.reserve(data.cameras.size());
     for (const auto& camera : data.cameras) {
-      camera_models.push_back(vlb::buildCameraModel(data, camera, d65));
+      camera_models.push_back(vlb::buildCameraModel(
+          data, camera_reference_observer, camera, d65));
     }
 
-    AppState state = defaultState(d65_index, default_camera_index);
+    // Build one fixed physical primary set for each output RGB space. The
+    // spectra are fitted once to the standard 1931 2-degree primary
+    // chromaticities, then those exact spectra are characterized separately
+    // with every supported observer.
+    const std::array<vlb::SpectralDisplayPrimaries, 2> display_primaries = {
+        vlb::buildReferenceDisplayPrimaries(
+            data, camera_reference_observer, vlb::OutputSpace::SRGB),
+        vlb::buildReferenceDisplayPrimaries(
+            data, camera_reference_observer, vlb::OutputSpace::AdobeRGB1998)};
+
+    std::vector<std::array<vlb::ReferenceDisplayModel, 2>> display_models;
+    display_models.reserve(data.observers.size());
+    for (const auto& observer : data.observers) {
+      display_models.push_back(
+          {vlb::buildReferenceDisplayModel(
+               data, observer, d65, display_primaries[0],
+               vlb::OutputSpace::SRGB),
+           vlb::buildReferenceDisplayModel(
+               data, observer, d65, display_primaries[1],
+               vlb::OutputSpace::AdobeRGB1998)});
+    }
+
+    AppState state = defaultState(d65_index, default_observer_index,
+                                  default_camera_index);
 
     std::cout << "Loaded spectral data from: " << data_dir << "\n";
     std::cout << "ColorChecker patches: " << data.patches.size() << "\n";
-    std::cout << "Illuminants: ";
+    std::cout << "Standard observers: ";
+    for (std::size_t i = 0; i < data.observers.size(); ++i) {
+      if (i != 0) std::cout << ", ";
+      std::cout << data.observers[i].name;
+    }
+    std::cout << "\nIlluminants: ";
     for (std::size_t i = 0; i < data.illuminants.size(); ++i) {
       if (i != 0) std::cout << ", ";
       std::cout << data.illuminants[i].name;
     }
     std::cout << "\nJiang cameras: " << data.cameras.size() << "\n";
+    std::cout << "\nDefault observer: "
+              << data.observers.at(default_observer_index).name << "\n";
     std::cout << "Default camera: "
               << data.cameras.at(default_camera_index).name << "\n";
     printCameraMatrix(data.cameras.at(default_camera_index).name,
                       camera_models.at(default_camera_index));
+    std::cout << "\nReference display primaries: Synthetic Gaussian-mixture "
+                 "spectra fitted to standard 2-degree RGB chromaticities\n";
+    printDisplayMatrix(
+        display_models.at(default_observer_index)
+            .at(outputSpaceIndex(vlb::OutputSpace::SRGB)));
     printHelp();
 
     cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
 
     bool quit = false;
     while (!quit) {
-      const cv::Mat image = renderChart(data, camera_models, state, d65_white);
+      const cv::Mat image =
+          renderChart(data, camera_models, display_models,
+                      camera_reference_observer_index, observer_d65_whites,
+                      state);
       cv::imshow(kWindowName, image);
       printState(data, state, sampling_nm);
 
@@ -351,7 +470,8 @@ int main(int argc, char** argv) {
             break;
 
           case 27:  // Esc
-            state = defaultState(d65_index, default_camera_index);
+            state = defaultState(d65_index, default_observer_index,
+                                 default_camera_index);
             std::cout << "\n";
             std::cout << "RESET: default state restablished" << "\n";
             redraw = true;
@@ -389,21 +509,26 @@ int main(int argc, char** argv) {
             break;
 
           case 'm':
-            if (!state.camera_mode) break;
-            state.camera_index =
-                (state.camera_index + 1) % data.cameras.size();
-            std::cout << "Selected camera: "
-                      << data.cameras.at(state.camera_index).name << "\n";
+            if (state.camera_mode) {
+              state.camera_index =
+                  (state.camera_index + 1) % data.cameras.size();
+            } else {
+              state.observer_index =
+                  (state.observer_index + 1) % data.observers.size();
+            }
             redraw = true;
             break;
 
           case 'M':
-            if (!state.camera_mode) break;
-            state.camera_index =
-                (state.camera_index + data.cameras.size() - 1) %
-                data.cameras.size();
-            std::cout << "Selected camera: "
-                      << data.cameras.at(state.camera_index).name << "\n";
+            if (state.camera_mode) {
+              state.camera_index =
+                  (state.camera_index + data.cameras.size() - 1) %
+                  data.cameras.size();
+            } else {
+              state.observer_index =
+                  (state.observer_index + data.observers.size() - 1) %
+                  data.observers.size();
+            }
             redraw = true;
             break;
 
