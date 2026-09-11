@@ -292,36 +292,46 @@ CameraModel buildCameraModel(const SpectralData& data,
                              const StandardObserver& reference_observer,
                              const CameraSensitivity& camera,
                              const Illuminant& d65) {
-  cv::Mat raw(static_cast<int>(data.patches.size()), 3, CV_64F);
-  cv::Mat xyz(static_cast<int>(data.patches.size()), 3, CV_64F);
+  // Fit the camera directly to the reference observer in the spectral domain.
+  // For each wavelength sample, solve
+  //
+  //   [s_R(lambda) s_G(lambda) s_B(lambda)] B
+  //       ~= [x_bar(lambda) y_bar(lambda) z_bar(lambda)]
+  //
+  // in the least-squares sense. Storing B^T then gives the column-vector
+  // transform XYZ ~= M * raw RGB. This is the best 3x3 Luther-style fit for
+  // the measured camera sensitivities on the active spectral grid and does not
+  // depend on a particular illuminant or set of surface reflectances.
+  const int sample_count = static_cast<int>(data.wavelengths_nm.size());
+  cv::Mat sensitivities(sample_count, 3, CV_64F);
+  cv::Mat cmfs(sample_count, 3, CV_64F);
 
-  for (std::size_t i = 0; i < data.patches.size(); ++i) {
-    const cv::Vec3d r = cameraRawResponse(
-        data, reference_observer, camera, data.patches[i].reflectance, d65, 1.0);
-    const cv::Vec3d x = reflectanceToXYZ(
-        data, reference_observer, data.patches[i].reflectance, d65, 1.0);
-
+  for (int i = 0; i < sample_count; ++i) {
     for (int c = 0; c < 3; ++c) {
-      raw.at<double>(static_cast<int>(i), c) = r[c];
-      xyz.at<double>(static_cast<int>(i), c) = x[c];
+      sensitivities.at<double>(i, c) =
+          camera.rgb[c][static_cast<std::size_t>(i)];
+      cmfs.at<double>(i, c) =
+          reference_observer.xyz_cmf[c][static_cast<std::size_t>(i)];
     }
   }
 
   cv::Mat row_raw_to_row_xyz;
-  if (!cv::solve(raw, xyz, row_raw_to_row_xyz, cv::DECOMP_SVD)) {
-    throw std::runtime_error("Unable to solve camera color-correction matrix: " +
+  if (!cv::solve(sensitivities, cmfs, row_raw_to_row_xyz, cv::DECOMP_SVD)) {
+    throw std::runtime_error("Unable to solve spectral camera-to-XYZ matrix: " +
                              camera.name);
   }
 
   CameraModel model;
-  // cv::solve gives B such that [raw row] B = [XYZ row]. Store B^T so that
-  // column-vector use is XYZ = M * raw.
+  // cv::solve gives B such that [camera-response row] B ~= [XYZ-CMF row].
+  // Store B^T so ordinary column-vector use is XYZ ~= M * raw.
   for (int r = 0; r < 3; ++r) {
     for (int c = 0; c < 3; ++c) {
       model.raw_to_xyz(r, c) = row_raw_to_row_xyz.at<double>(c, r);
     }
   }
 
+  // The D65 raw white is retained only for the optional diagonal camera white
+  // balance. It does not participate in the spectral matrix fit above.
   model.d65_white_raw =
       cameraWhiteResponse(data, reference_observer, camera, d65);
   return model;
@@ -354,6 +364,7 @@ cv::Vec3d cameraResponseToXYZ(const SpectralData& data,
 SpectralDisplayPrimaries buildReferenceDisplayPrimaries(
     const SpectralData& data,
     const StandardObserver& cie_1931_2deg_observer,
+    const Illuminant& d65,
     OutputSpace output_space) {
   const ReferencePrimaryDefinition definition = primaryDefinition(output_space);
 
@@ -364,6 +375,35 @@ SpectralDisplayPrimaries buildReferenceDisplayPrimaries(
         data, cie_1931_2deg_observer, definition.xy[channel],
         definition.gaussian_centers_nm[channel]);
   }
+
+  // Establish the physical primary powers once, using the conventional
+  // 1931 2-degree / D65 reference. After this point the spectra, including
+  // their relative amplitudes, are frozen. A different observer therefore
+  // re-observes the same display rather than causing the display primaries to
+  // change power.
+  cv::Matx33d primary_xyz;
+  for (int channel = 0; channel < 3; ++channel) {
+    const cv::Vec3d xyz =
+        emissionToXYZ(data, cie_1931_2deg_observer, primaries.rgb[channel]);
+    for (int row = 0; row < 3; ++row) {
+      primary_xyz(row, channel) = xyz[row];
+    }
+  }
+
+  const cv::Vec3d d65_white =
+      illuminantWhiteXYZ(data, cie_1931_2deg_observer, d65);
+  const cv::Vec3d scales = solve3x3(primary_xyz, d65_white);
+
+  for (int channel = 0; channel < 3; ++channel) {
+    if (scales[channel] <= kEpsilon) {
+      throw std::runtime_error(
+          "Reference-display D65 scaling produced a nonpositive primary.");
+    }
+    for (double& value : primaries.rgb[channel]) {
+      value *= scales[channel];
+    }
+  }
+
   return primaries;
 }
 
@@ -373,30 +413,18 @@ ReferenceDisplayModel buildReferenceDisplayModel(
     const Illuminant& d65,
     const SpectralDisplayPrimaries& primaries,
     OutputSpace output_space) {
-  cv::Matx33d primary_xyz;
-  for (int channel = 0; channel < 3; ++channel) {
-    const cv::Vec3d xyz = emissionToXYZ(data, observer, primaries.rgb[channel]);
-    for (int row = 0; row < 3; ++row) {
-      primary_xyz(row, channel) = xyz[row];
-    }
-  }
-
-  const cv::Vec3d d65_white = illuminantWhiteXYZ(data, observer, d65);
-  const cv::Vec3d scales = solve3x3(primary_xyz, d65_white);
-
   ReferenceDisplayModel model;
   model.name = primaries.name + " / " + observer.name;
   model.output_space = output_space;
-  model.d65_white_xyz = d65_white;
+  model.d65_white_xyz = illuminantWhiteXYZ(data, observer, d65);
 
-  for (int row = 0; row < 3; ++row) {
-    for (int channel = 0; channel < 3; ++channel) {
-      if (scales[channel] <= kEpsilon) {
-        throw std::runtime_error(
-            "Reference-display D65 scaling produced a nonpositive primary.");
-      }
-      model.rgb_to_xyz(row, channel) =
-          primary_xyz(row, channel) * scales[channel];
+  // The primary spectra already include their fixed physical power scaling.
+  // Characterizing another observer therefore consists only of reintegrating
+  // those same spectra with the new CMFs. Do not rescale the primaries here.
+  for (int channel = 0; channel < 3; ++channel) {
+    const cv::Vec3d xyz = emissionToXYZ(data, observer, primaries.rgb[channel]);
+    for (int row = 0; row < 3; ++row) {
+      model.rgb_to_xyz(row, channel) = xyz[row];
     }
   }
 

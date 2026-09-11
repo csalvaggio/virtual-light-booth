@@ -328,7 +328,7 @@ void printHelp() {
 void printCameraMatrix(const std::string& camera_name,
                        const vlb::CameraModel& model) {
   std::cout << camera_name
-            << " D65-fitted raw-to-XYZ matrix (2-degree CIE reference):\n";
+            << " spectral raw-to-XYZ matrix (2-degree CIE reference):\n";
   for (int r = 0; r < 3; ++r) {
     std::cout << "  [ ";
     for (int c = 0; c < 3; ++c) {
@@ -387,10 +387,10 @@ int main(int argc, char** argv) {
           vlb::illuminantWhiteXYZ(data, observer, d65));
     }
 
-    // Camera color-correction matrices intentionally remain tied to the
-    // CIE 1931 2-degree observer, independently of the default/selected CIE
-    // viewing observer. Observer selection affects only the standard-observer
-    // rendering path.
+    // Camera color-correction matrices are fit directly in the spectral
+    // domain to the CIE 1931 2-degree CMFs. They intentionally remain tied to
+    // that fixed camera colorimetric reference, independently of the selected
+    // CIE viewing observer.
     std::vector<vlb::CameraModel> camera_models;
     camera_models.reserve(data.cameras.size());
     for (const auto& camera : data.cameras) {
@@ -399,14 +399,16 @@ int main(int argc, char** argv) {
     }
 
     // Build one fixed physical primary set for each output RGB space. The
-    // spectra are fitted once to the standard 1931 2-degree primary
-    // chromaticities, then those exact spectra are characterized separately
-    // with every supported observer.
+    // spectral shapes are fitted to the standard 1931 2-degree primary
+    // chromaticities and their relative powers are calibrated once to D65.
+    // Those exact scaled spectra are then characterized separately with every
+    // supported observer; observer changes never alter the display itself.
     const std::array<vlb::SpectralDisplayPrimaries, 2> display_primaries = {
         vlb::buildReferenceDisplayPrimaries(
-            data, camera_reference_observer, vlb::OutputSpace::SRGB),
+            data, camera_reference_observer, d65, vlb::OutputSpace::SRGB),
         vlb::buildReferenceDisplayPrimaries(
-            data, camera_reference_observer, vlb::OutputSpace::AdobeRGB1998)};
+            data, camera_reference_observer, d65,
+            vlb::OutputSpace::AdobeRGB1998)};
 
     std::vector<std::array<vlb::ReferenceDisplayModel, 2>> display_models;
     display_models.reserve(data.observers.size());
@@ -443,7 +445,8 @@ int main(int argc, char** argv) {
     printCameraMatrix(data.cameras.at(default_camera_index).name,
                       camera_models.at(default_camera_index));
     std::cout << "\nReference display primaries: Synthetic Gaussian-mixture "
-                 "spectra fitted to standard 2-degree RGB chromaticities\n";
+                 "spectra fitted to standard 2-degree RGB chromaticities "
+                 "and power-calibrated once to 2-degree D65\n";
     printDisplayMatrix(
         display_models.at(default_observer_index)
             .at(outputSpaceIndex(vlb::OutputSpace::SRGB)));

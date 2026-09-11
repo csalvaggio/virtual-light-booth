@@ -78,19 +78,26 @@ Observer selection is confined to the CIE rendering path. It does not change the
 
 The reflected spectrum can instead be integrated against any of the 28 measured camera spectral sensitivities from Jiang et al. (2013). These three integrals are camera-raw RGB responses, not display RGB values.
 
-At startup, the program fits a separate 3 x 3 raw-camera-RGB-to-XYZ matrix for every camera by least squares using all 24 ColorChecker patches under D65. The XYZ targets for these fits are always computed with the **CIE 1931 2-degree observer**.
+At startup, the program fits a separate 3 x 3 raw-camera-RGB-to-XYZ matrix for every camera directly in the **spectral domain**. At each wavelength sample, the camera's three sensitivity values are fit by least squares to the **CIE 1931 2-degree** color-matching functions. In matrix form, the fit minimizes
 
-This fixed 2-degree reference is intentional:
+```text
+[s_R(lambda) s_G(lambda) s_B(lambda)] B
+    ~= [x_bar(lambda) y_bar(lambda) z_bar(lambda)]
+```
+
+and stores `B^T` so column-vector camera responses are converted by `XYZ ~= M * RGB_camera`.
+
+This is a Luther-style best linear colorimetric fit. It is independent of the ColorChecker reflectances and of D65; D65 is used only to define the optional camera white-balance reference. The fixed 2-degree colorimetric reference is intentional:
 
 - the camera spectral sensitivities themselves are physical sensor responses and do not depend on a CIE observer;
-- only the camera RGB-to-XYZ color-correction fit needs a colorimetric reference observer;
+- the spectral camera RGB-to-XYZ fit needs one fixed colorimetric reference observer;
 - changing the selected observer in CIE mode therefore has no hidden effect on camera mode.
 
 Optional diagonal camera white balance maps the camera response of a perfect spectrally flat white reflector under the current illuminant to that same camera's perfect-white response under D65. It is a simple pedagogical white-balance model, not a simulation of a manufacturer's automatic white-balance algorithm.
 
 For classifier demonstrations intended to preserve illuminant differences, camera white balance should normally remain **off**.
 
-The fitted camera matrices are pedagogical approximations; they are not manufacturer profiles and do not reproduce complete in-camera processing pipelines.
+The fitted camera matrices are best 3 x 3 spectral approximations. Real cameras do not in general satisfy the Luther condition exactly, so a single 3 x 3 matrix cannot make every spectrum colorimetrically exact. The matrices are not manufacturer profiles and do not reproduce complete in-camera processing pipelines.
 
 The default camera is **Canon 5DMarkII**.
 
@@ -120,11 +127,11 @@ These are the conventional primary chromaticities of the corresponding RGB encod
 
 To create a physical spectral model, each primary is represented by a nonnegative mixture of three smooth Gaussian basis spectra with 20 nm FWHM. The basis wavelengths are fixed by the project, and the mixture weights are solved at startup so that the resulting primary reproduces the target chromaticity under the **CIE 1931 2-degree observer** on the current computational wavelength grid.
 
-The resulting R, G, and B spectra are then frozen. They are project-defined synthetic spectra, not measurements of a particular monitor.
+The three fitted spectral shapes are next given their relative physical power scaling **once**, using the CIE 1931 2-degree observer: the scale factors are chosen so equal linear R, G, and B drive reproduces the project's numerically integrated D65 white. The resulting scaled R, G, and B spectra are then frozen. They are project-defined synthetic spectra, not measurements of a particular monitor.
 
 ### Observer-specific display matrices
 
-For each supported observer, the same frozen primary spectra are reintegrated with that observer's color-matching functions. The three primary scale factors are then solved so that equal RGB values reproduce that observer's numerically integrated D65 white over the project's working spectral range.
+For each supported observer, the exact same frozen, power-scaled primary spectra are reintegrated with that observer's color-matching functions. **No observer-dependent rescaling of the primaries is performed.** Thus switching observers changes the observer looking at the display, not the physical display itself.
 
 This produces an observer-specific
 
@@ -140,7 +147,7 @@ XYZ -> linear RGB
 
 for the **same assumed physical display**.
 
-Consequently, switching from the 2-degree to the 10-degree observer in CIE mode changes both the scene colorimetry and the display colorimetry while leaving the physical scene and assumed display spectra unchanged.
+Consequently, switching from the 2-degree to the 10-degree observer in CIE mode changes both the scene colorimetry and the colorimetric characterization of the display while leaving the physical scene and the emitted display-primary spectra unchanged. Equal RGB drive is calibrated to D65 only for the 1931 2-degree reference; a 10-degree observer may assign a different XYZ white to that same equal-drive physical emission.
 
 In camera mode, the raw-to-XYZ camera matrices are defined in CIE 1931 2-degree XYZ, so camera output is always rendered using the 2-degree characterization of the selected reference display. This avoids mixing incompatible XYZ definitions.
 

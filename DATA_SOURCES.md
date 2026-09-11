@@ -157,11 +157,18 @@ build/data/camspec_database.txt
 
 The Jiang spectral sensitivities produce camera-raw RGB responses; they are not themselves display RGB values.
 
-For each camera, the application fits a 3 x 3 raw-RGB-to-XYZ matrix by least squares using all 24 ColorChecker patches under D65. The XYZ targets are always computed with the **CIE 1931 2-degree observer**.
+For each camera, the application fits a 3 x 3 raw-RGB-to-XYZ matrix directly from the measured spectral sensitivities. On the active wavelength grid it solves, in the least-squares sense,
 
-This 2-degree observer is therefore the fixed **camera colorimetric reference observer**. Changing the selected CIE observer in standard-observer mode does not refit or alter the camera matrices.
+```text
+[s_R(lambda) s_G(lambda) s_B(lambda)] B
+    ~= [x_bar(lambda) y_bar(lambda) z_bar(lambda)]
+```
 
-Optional camera white balance is a diagonal raw-RGB scaling that maps the camera response of a perfect spectrally flat white reflector under the current illuminant to the same camera's perfect-white response under D65. It is a project modeling choice, not a manufacturer-specific auto-white-balance model.
+using the **CIE 1931 2-degree observer** CMFs and then stores `B^T` for column-vector use. This is a Luther-style best linear fit and does not use the ColorChecker patches or a particular illuminant as training data. Because the Jiang channels are independently normalized, their unknown constant relative gains are absorbed by the fitted 3 x 3 transform.
+
+This 2-degree observer is therefore the fixed **camera colorimetric reference observer**. Changing the selected CIE observer in standard-observer mode does not refit or alter the camera matrices. Because measured cameras do not generally satisfy the Luther condition exactly, the resulting matrix is an approximation rather than an exact spectral equivalence.
+
+Optional camera white balance is a diagonal raw-RGB scaling that maps the camera response of a perfect spectrally flat white reflector under the current illuminant to the same camera's perfect-white response under D65. It is a project modeling choice, not a manufacturer-specific auto-white-balance model. D65 is used for this white-balance reference, not for fitting the camera-to-XYZ matrix.
 
 ## Reference spectral display and RGB encodings
 
@@ -203,7 +210,9 @@ Each R, G, and B primary is represented as a **nonnegative mixture of three Gaus
 
 These spectral primary shapes are a modeling choice made by this project. They are **not** measured spectra from an sRGB monitor, an Adobe RGB monitor, or any particular physical display.
 
-After fitting, the primary spectral shapes are frozen. For each supported CIE observer, those same spectra are reintegrated with that observer's CMFs and scaled so equal R, G, and B reproduce that observer's numerically integrated D65 white over the active project wavelength range. This yields observer-specific RGB-to-XYZ and XYZ-to-RGB matrices for one fixed assumed physical display.
+After fitting the primary shapes, their relative physical powers are calibrated **once** under the CIE 1931 2-degree observer so equal linear R, G, and B drive reproduces the numerically integrated D65 white over the active project wavelength range. Those scaled primary spectra are then frozen.
+
+For each supported CIE observer, the exact same frozen physical spectra are reintegrated with that observer's CMFs. No observer-dependent primary rescaling is performed. This yields observer-specific RGB-to-XYZ and XYZ-to-RGB matrices for one genuinely fixed assumed physical display. Equal RGB drive is therefore guaranteed to correspond to D65 in the 1931 2-degree reference characterization, but the 1964 10-degree observer may assign a different XYZ white to the same equal-drive physical emission.
 
 In standard-observer mode, the display matrix follows the selected CIE observer. In camera mode, the display matrix is fixed to the CIE 1931 2-degree characterization because the camera color-correction matrices produce 1931-2-degree XYZ.
 
